@@ -275,3 +275,37 @@ test "round trip" {
     try Integration.validate(bool, false, examples.bool_false);
     try Integration.validate(bool, true, examples.bool_true);
 }
+
+test "example" {
+    const bincode = @This(); //@import("bincode-zig");
+
+    const Shared = struct {
+        name: []const u8,
+        age: u32,
+    };
+
+    var example = Shared{ .name = "Cat", .age = 5 };
+
+    // Serialize Shared to buffer
+    var buffer: [8192]u8 = undefined;
+    var output_stream = std.io.fixedBufferStream(buffer[0..]);
+    try bincode.serialize(output_stream.writer(), example);
+
+    // Use an arena to gather allocations from deserializer to make
+    // them easy to clean up together. Allocations are required for
+    // slices.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Read what we wrote
+    var input_stream = std.io.fixedBufferStream(output_stream.getWritten());
+    const copy = try bincode.deserialize(
+        input_stream.reader(),
+        arena.allocator(),
+        Shared,
+    );
+
+    // Make sure it is the same
+    try std.testing.expectEqualStrings("Cat", copy.name);
+    try std.testing.expectEqual(@as(u32, 5), copy.age);
+}
