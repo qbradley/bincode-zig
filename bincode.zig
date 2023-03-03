@@ -6,7 +6,7 @@ pub fn deserialize(stream: anytype, allocator: std.mem.Allocator, comptime T: ty
         .Bool => switch (try stream.readIntLittle(u8)) {
             0 => return false,
             1 => return true,
-            else => unreachable,
+            else => invalidProtocol("Boolean values should be encoded as a single byte with value 0 or 1 only."),
         },
         .Float => switch (T) {
             f32 => return @bitCast(T, try stream.readIntLittle(u32)),
@@ -31,7 +31,7 @@ pub fn deserialize(stream: anytype, allocator: std.mem.Allocator, comptime T: ty
             0 => return null,
             // Some
             1 => return try deserialize(stream, allocator, opt.child),
-            else => unreachable,
+            else => invalidProtocol("Optional is encoded as a single 0 valued byte for null, or a single 1 valued byte followed by the encoding of the contained value."),
         },
         .Pointer => |ptr| {
             if (ptr.sentinel != null) unsupportedType(T);
@@ -43,7 +43,7 @@ pub fn deserialize(stream: anytype, allocator: std.mem.Allocator, comptime T: ty
                     if (ptr.child == u8) {
                         const amount = try stream.readAll(memory);
                         if (amount != len) {
-                            unreachable;
+                            invalidProtocol("The stream end was found before all required bytes were read.");
                         }
                     } else {
                         for (0..len) |idx| {
@@ -62,7 +62,7 @@ pub fn deserialize(stream: anytype, allocator: std.mem.Allocator, comptime T: ty
             if (arr.child == u8) {
                 const amount = try stream.readAll(value[0..]);
                 if (amount != arr.len) {
-                    unreachable;
+                    invalidProtocol("The stream end was found before all required bytes were read.");
                 }
             } else {
                 for (0..arr.len) |idx| {
@@ -188,8 +188,12 @@ pub fn serialize(stream: anytype, value: anytype) @TypeOf(stream).Error!void {
     }
 }
 
-fn unsupportedType(comptime T: type) void {
+fn unsupportedType(comptime T: type) noreturn {
     @compileError("Unsupported type " ++ @typeName(T));
+}
+
+fn invalidProtocol(comptime message: []const u8) noreturn {
+    @panic("Invalid protocol detected: " ++ message);
 }
 
 test "round trip" {
