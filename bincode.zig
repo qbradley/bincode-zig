@@ -4,18 +4,36 @@ const std = @import("std");
 // contains interior slices and input is a buffer, for a lazy
 // zero allocation deserializer.
 
-pub fn deserialize(stream: anytype, allocator: std.mem.Allocator, comptime T: type) !T {
+// TODO: add a way to deserialize from a buffer than can return
+// `[]const u8` slices from the buffer without allocating
+
+pub fn deserializeAlloc(stream: anytype, allocator: std.mem.Allocator, comptime T: type) !T {
     return switch (@typeInfo(T)) {
         .Void => {},
         .Bool => try deserializeBool(stream),
         .Float => try deserializeFloat(stream, T),
         .Int => try deserializeInt(stream, T),
-        .Optional => |info| try deserializeOptional(stream, allocator, info.child),
-        .Pointer => |info| try deserializePointer(stream, info, allocator),
-        .Array => |info| try deserializeArray(stream, info, allocator),
-        .Struct => |info| try deserializeStruct(stream, info, allocator, T),
+        .Optional => |info| try deserializeOptionalAlloc(stream, allocator, info.child),
+        .Pointer => |info| try deserializePointerAlloc(stream, info, allocator),
+        .Array => |info| try deserializeArrayAlloc(stream, info, allocator),
+        .Struct => |info| try deserializeStructAlloc(stream, info, allocator, T),
         .Enum => try deserializeEnum(stream, T),
-        .Union => |info| try deserializeUnion(stream, info, allocator, T),
+        .Union => |info| try deserializeUnionAlloc(stream, info, allocator, T),
+        else => unsupportedType(T),
+    };
+}
+
+pub fn deserialize(stream: anytype, comptime T: type) !T {
+    return switch (@typeInfo(T)) {
+        .Void => {},
+        .Bool => try deserializeBool(stream),
+        .Float => try deserializeFloat(stream, T),
+        .Int => try deserializeInt(stream, T),
+        .Optional => |info| try deserializeOptional(stream, info.child),
+        .Array => |info| try deserializeArray(stream, info),
+        .Struct => |info| try deserializeStruct(stream, info, T),
+        .Enum => try deserializeEnum(stream, T),
+        .Union => |info| try deserializeUnion(stream, info, T),
         else => unsupportedType(T),
     };
 }
@@ -69,17 +87,27 @@ fn deserializeInt(stream: anytype, comptime T: type) !T {
     }
 }
 
-fn deserializeOptional(stream: anytype, allocator: std.mem.Allocator, comptime T: type) !?T {
+fn deserializeOptionalAlloc(stream: anytype, allocator: std.mem.Allocator, comptime T: type) !?T {
     switch (try stream.readIntLittle(u8)) {
         // None
         0 => return null,
         // Some
-        1 => return try deserialize(stream, allocator, T),
+        1 => return try deserializeAlloc(stream, allocator, T),
         else => invalidProtocol("Optional is encoded as a single 0 valued byte for null, or a single 1 valued byte followed by the encoding of the contained value."),
     }
 }
 
-fn deserializePointer(stream: anytype, comptime info: std.builtin.Type.Pointer, allocator: std.mem.Allocator) ![]info.child {
+fn deserializeOptional(stream: anytype, comptime T: type) !?T {
+    switch (try stream.readIntLittle(u8)) {
+        // None
+        0 => return null,
+        // Some
+        1 => return try deserialize(stream, T),
+        else => invalidProtocol("Optional is encoded as a single 0 valued byte for null, or a single 1 valued byte followed by the encoding of the contained value."),
+    }
+}
+
+fn deserializePointerAlloc(stream: anytype, comptime info: std.builtin.Type.Pointer, allocator: std.mem.Allocator) ![]info.child {
     const T = @Type(.{ .Pointer = info });
     if (info.sentinel != null) unsupportedType(T);
     switch (info.size) {
@@ -94,7 +122,7 @@ fn deserializePointer(stream: anytype, comptime info: std.builtin.Type.Pointer, 
                 }
             } else {
                 for (0..len) |idx| {
-                    memory[idx] = try deserialize(stream, allocator, info.child);
+                    memory[idx] = try deserializeAlloc(stream, allocator, info.child);
                 }
             }
             return memory;
@@ -104,7 +132,7 @@ fn deserializePointer(stream: anytype, comptime info: std.builtin.Type.Pointer, 
     }
 }
 
-fn deserializeArray(stream: anytype, comptime info: std.builtin.Type.Array, allocator: std.mem.Allocator) ![info.len]info.child {
+fn deserializeArrayAlloc(stream: anytype, comptime info: std.builtin.Type.Array, allocator: std.mem.Allocator) ![info.len]info.child {
     const T = @Type(.{ .Array = info });
     if (info.sentinel != null) unsupportedType(T);
     var value: T = undefined;
@@ -115,16 +143,41 @@ fn deserializeArray(stream: anytype, comptime info: std.builtin.Type.Array, allo
         }
     } else {
         for (0..info.len) |idx| {
-            value[idx] = try deserialize(stream, allocator, info.child);
+            value[idx] = try deserializeAlloc(stream, allocator, info.child);
         }
     }
     return value;
 }
 
-fn deserializeStruct(stream: anytype, comptime info: std.builtin.Type.Struct, allocator: std.mem.Allocator, comptime T: type) !T {
+fn deserializeArray(stream: anytype, comptime info: std.builtin.Type.Array) ![info.len]info.child {
+    const T = @Type(.{ .Array = info });
+    if (info.sentinel != null) unsupportedType(T);
+    var value: T = undefined;
+    if (info.child == u8) {
+        const amount = try stream.readAll(value[0..]);
+        if (amount != info.len) {
+            invalidProtocol("The stream end was found before all required bytes were read.");
+        }
+    } else {
+        for (0..info.len) |idx| {
+            value[idx] = try deserialize(stream, info.child);
+        }
+    }
+    return value;
+}
+
+fn deserializeStructAlloc(stream: anytype, comptime info: std.builtin.Type.Struct, allocator: std.mem.Allocator, comptime T: type) !T {
     var value: T = undefined;
     inline for (info.fields) |field| {
-        @field(value, field.name) = try deserialize(stream, allocator, field.type);
+        @field(value, field.name) = try deserializeAlloc(stream, allocator, field.type);
+    }
+    return value;
+}
+
+fn deserializeStruct(stream: anytype, comptime info: std.builtin.Type.Struct, comptime T: type) !T {
+    var value: T = undefined;
+    inline for (info.fields) |field| {
+        @field(value, field.name) = try deserialize(stream, field.type);
     }
     return value;
 }
@@ -134,14 +187,31 @@ fn deserializeEnum(stream: anytype, comptime T: type) !T {
     return @intToEnum(T, raw_tag);
 }
 
-fn deserializeUnion(stream: anytype, comptime info: std.builtin.Type.Union, allocator: std.mem.Allocator, comptime T: type) !T {
+fn deserializeUnionAlloc(stream: anytype, comptime info: std.builtin.Type.Union, allocator: std.mem.Allocator, comptime T: type) !T {
     if (info.tag_type) |Tag| {
-        const raw_tag = try deserialize(stream, allocator, u32);
+        const raw_tag = try deserializeAlloc(stream, allocator, u32);
         const tag = @intToEnum(Tag, raw_tag);
 
         inline for (info.fields) |field| {
             if (tag == @field(Tag, field.name)) {
-                var inner = try deserialize(stream, allocator, field.type);
+                var inner = try deserializeAlloc(stream, allocator, field.type);
+                return @unionInit(T, field.name, inner);
+            }
+        }
+        unreachable;
+    } else {
+        unsupportedType(T);
+    }
+}
+
+fn deserializeUnion(stream: anytype, comptime info: std.builtin.Type.Union, comptime T: type) !T {
+    if (info.tag_type) |Tag| {
+        const raw_tag = try deserialize(stream, u32);
+        const tag = @intToEnum(Tag, raw_tag);
+
+        inline for (info.fields) |field| {
+            if (tag == @field(Tag, field.name)) {
+                var inner = try deserialize(stream, field.type);
                 return @unionInit(T, field.name, inner);
             }
         }
@@ -267,7 +337,7 @@ test "round trip" {
         One,
         Two,
     };
-    const TestType = struct {
+    const TestTypeAlloc = struct {
         u: TestUnion,
         e: TestEnum,
         s: []const u8,
@@ -282,8 +352,21 @@ test "round trip" {
         }
     };
 
+    const TestType = struct {
+        u: TestUnion,
+        e: TestEnum,
+        point: [2]f64,
+        o: ?u8,
+
+        pub fn validate(self: @This(), other: @This()) !void {
+            try expectEqual(self.u, other.u);
+            try expectEqual(self.point, other.point);
+            try expectEqual(self.o, other.o);
+        }
+    };
+
     const Integration = struct {
-        fn validate(comptime T: type, value: T, expected: []const u8) !void {
+        fn validateAlloc(comptime T: type, value: T, expected: []const u8) !void {
             var buffer: [8192]u8 = undefined;
 
             // serialize value and make sure it matches exactly the bytes
@@ -297,7 +380,29 @@ test "round trip" {
             var input_stream = std.io.fixedBufferStream(expected);
             var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
             defer arena.deinit();
-            var copy = try deserialize(input_stream.reader(), arena.allocator(), T);
+            var copy = try deserializeAlloc(input_stream.reader(), arena.allocator(), T);
+
+            if (@typeInfo(T) == .Struct and @hasDecl(T, "validate")) {
+                try T.validate(value, copy);
+            } else {
+                try std.testing.expectEqual(value, copy);
+            }
+
+            // NOTE: expectEqual does not do structural equality for slices.
+        }
+        fn validate(comptime T: type, value: T, expected: []const u8) !void {
+            var buffer: [8192]u8 = undefined;
+
+            // serialize value and make sure it matches exactly the bytes
+            // from the rust implementation.
+            var output_stream = std.io.fixedBufferStream(buffer[0..]);
+            try serialize(output_stream.writer(), value);
+            try std.testing.expectEqualSlices(u8, expected, output_stream.getWritten());
+
+            // deserialize the bytes and make sure resulting object is exactly
+            // what we started with.
+            var input_stream = std.io.fixedBufferStream(expected);
+            var copy = try deserialize(input_stream.reader(), T);
 
             if (@typeInfo(T) == .Struct and @hasDecl(T, "validate")) {
                 try T.validate(value, copy);
@@ -309,10 +414,36 @@ test "round trip" {
         }
     };
 
-    var testType = TestType{
+    var testTypeAlloc = TestTypeAlloc{
         .u = .{ .y = 5 },
         .e = .One,
         .s = "abcdefgh",
+        .point = .{ 1.1, 2.2 },
+        .o = 255,
+    };
+
+    try Integration.validateAlloc(TestTypeAlloc, testTypeAlloc, examples.test_type_alloc);
+    try Integration.validateAlloc(TestUnion, .{ .x = 6 }, examples.test_union);
+    try Integration.validateAlloc(TestEnum, .Two, examples.test_enum);
+    try Integration.validateAlloc(?u8, null, examples.none);
+    try Integration.validateAlloc(i8, 100, examples.int_i8);
+    try Integration.validateAlloc(u8, 101, examples.int_u8);
+    try Integration.validateAlloc(i16, 102, examples.int_i16);
+    try Integration.validateAlloc(u16, 103, examples.int_u16);
+    try Integration.validateAlloc(i32, 104, examples.int_i32);
+    try Integration.validateAlloc(u32, 105, examples.int_u32);
+    try Integration.validateAlloc(i64, 106, examples.int_i64);
+    try Integration.validateAlloc(u64, 107, examples.int_u64);
+    try Integration.validateAlloc(i128, 108, examples.int_i128);
+    try Integration.validateAlloc(u128, 109, examples.int_u128);
+    try Integration.validateAlloc(f32, 5.5, examples.int_f32);
+    try Integration.validateAlloc(f64, 6.6, examples.int_f64);
+    try Integration.validateAlloc(bool, false, examples.bool_false);
+    try Integration.validateAlloc(bool, true, examples.bool_true);
+
+    var testType = TestType{
+        .u = .{ .y = 5 },
+        .e = .One,
         .point = .{ 1.1, 2.2 },
         .o = 255,
     };
@@ -360,7 +491,7 @@ test "example" {
 
     // Read what we wrote
     var input_stream = std.io.fixedBufferStream(output_stream.getWritten());
-    const copy = try bincode.deserialize(
+    const copy = try bincode.deserializeAlloc(
         input_stream.reader(),
         arena.allocator(),
         Shared,

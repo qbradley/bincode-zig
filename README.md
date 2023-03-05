@@ -59,7 +59,7 @@ test "example" {
 
     // Read what we wrote
     var input_stream = std.io.fixedBufferStream(output_stream.getWritten());
-    const copy = try bincode.deserialize(
+    const copy = try bincode.deserializeAlloc(
         input_stream.reader(),
         arena.allocator(),
         Shared,

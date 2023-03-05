@@ -11,10 +11,19 @@ enum TestEnum {
 }
 
 #[derive(serde::Serialize)]
-struct TestType {
+struct TestTypeAlloc {
     u: TestUnion,
     e: TestEnum,
     s: &'static str,
+    p: [f64; 2],
+    o: Option<u8>,
+    v: (),
+}
+
+#[derive(serde::Serialize)]
+struct TestType {
+    u: TestUnion,
+    e: TestEnum,
     p: [f64; 2],
     o: Option<u8>,
     v: (),
@@ -34,7 +43,7 @@ fn example<T: serde::Serialize>(name: &str, value: &T) {
 }
 
 fn main() {
-    let test_type = TestType {
+    let test_type_alloc = TestTypeAlloc {
         u: TestUnion::Y(5),
         e: TestEnum::One,
         s: "abcdefgh",
@@ -43,9 +52,18 @@ fn main() {
         v: (),
     };
 
+    let test_type = TestType {
+        u: TestUnion::Y(5),
+        e: TestEnum::One,
+        p: [1.1, 2.2],
+        o: Some(255),
+        v: (),
+    };
+
     println!("// This file is generated using 'cargo run >examples.zig'");
     println!("");
 
+    example::<TestTypeAlloc>("test_type_alloc", &test_type_alloc);
     example::<TestType>("test_type", &test_type);
     example::<TestUnion>("test_union", &TestUnion::X(6));
     example::<TestEnum>("test_enum", &TestEnum::Two);
