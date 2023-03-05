@@ -1,160 +1,202 @@
 const std = @import("std");
 
-pub fn deserialize(stream: anytype, allocator: std.mem.Allocator, comptime T: type) !T {
-    switch (@typeInfo(T)) {
-        .Void => {},
-        .Bool => switch (try stream.readIntLittle(u8)) {
-            0 => return false,
-            1 => return true,
-            else => invalidProtocol("Boolean values should be encoded as a single byte with value 0 or 1 only."),
-        },
-        .Float => switch (T) {
-            f32 => return @bitCast(T, try stream.readIntLittle(u32)),
-            f64 => return @bitCast(T, try stream.readIntLittle(u64)),
-            else => unsupportedType(T),
-        },
-        .Int => switch (T) {
-            i8 => return try stream.readIntLittle(i8),
-            i16 => return try stream.readIntLittle(i16),
-            i32 => return try stream.readIntLittle(i32),
-            i64 => return try stream.readIntLittle(i64),
-            i128 => return try stream.readIntLittle(i128),
-            u8 => return try stream.readIntLittle(u8),
-            u16 => return try stream.readIntLittle(u16),
-            u32 => return try stream.readIntLittle(u32),
-            u64 => return try stream.readIntLittle(u64),
-            u128 => return try stream.readIntLittle(u128),
-            else => unsupportedType(T),
-        },
-        .Optional => |opt| switch (try stream.readIntLittle(u8)) {
-            // None
-            0 => return null,
-            // Some
-            1 => return try deserialize(stream, allocator, opt.child),
-            else => invalidProtocol("Optional is encoded as a single 0 valued byte for null, or a single 1 valued byte followed by the encoding of the contained value."),
-        },
-        .Pointer => |ptr| {
-            if (ptr.sentinel != null) unsupportedType(T);
-            switch (ptr.size) {
-                .One => unsupportedType(T),
-                .Slice => {
-                    var len = @intCast(usize, try stream.readIntLittle(u64));
-                    var memory = try allocator.alloc(ptr.child, len);
-                    if (ptr.child == u8) {
-                        const amount = try stream.readAll(memory);
-                        if (amount != len) {
-                            invalidProtocol("The stream end was found before all required bytes were read.");
-                        }
-                    } else {
-                        for (0..len) |idx| {
-                            memory[idx] = try deserialize(stream, allocator, ptr.child);
-                        }
-                    }
-                    return memory;
-                },
-                .C => unsupportedType(T),
-                .Many => unsupportedType(T),
-            }
-        },
-        .Array => |arr| {
-            if (arr.sentinel != null) unsupportedType(T);
-            var value: T = undefined;
-            if (arr.child == u8) {
-                const amount = try stream.readAll(value[0..]);
-                if (amount != arr.len) {
-                    invalidProtocol("The stream end was found before all required bytes were read.");
-                }
-            } else {
-                for (0..arr.len) |idx| {
-                    value[idx] = try deserialize(stream, allocator, arr.child);
-                }
-            }
-            return value;
-        },
-        .Struct => |info| {
-            var value: T = undefined;
-            inline for (info.fields) |field| {
-                @field(value, field.name) = try deserialize(stream, allocator, field.type);
-            }
-            return value;
-        },
-        .Enum => {
-            const raw_tag = try deserialize(stream, allocator, u32);
-            return @intToEnum(T, raw_tag);
-        },
-        .Union => |info| {
-            if (info.tag_type) |Tag| {
-                const raw_tag = try deserialize(stream, allocator, u32);
-                const tag = @intToEnum(Tag, raw_tag);
+// TODO: special case deserialize for top level slice that only
+// contains interior slices and input is a buffer, for a lazy
+// zero allocation deserializer.
 
-                inline for (info.fields) |field| {
-                    if (tag == @field(Tag, field.name)) {
-                        var inner = try deserialize(stream, allocator, field.type);
-                        return @unionInit(T, field.name, inner);
-                    }
-                }
-            } else {
-                unsupportedType(T);
-            }
-        },
+pub fn deserialize(stream: anytype, allocator: std.mem.Allocator, comptime T: type) !T {
+    return switch (@typeInfo(T)) {
+        .Void => {},
+        .Bool => try deserializeBool(stream),
+        .Float => try deserializeFloat(stream, T),
+        .Int => try deserializeInt(stream, T),
+        .Optional => |info| try deserializeOptional(stream, allocator, info.child),
+        .Pointer => |info| try deserializePointer(stream, info, allocator),
+        .Array => |info| try deserializeArray(stream, info, allocator),
+        .Struct => |info| try deserializeStruct(stream, info, allocator, T),
+        .Enum => try deserializeEnum(stream, T),
+        .Union => |info| try deserializeUnion(stream, info, allocator, T),
         else => unsupportedType(T),
-    }
-    unreachable;
+    };
 }
 
 pub fn serialize(stream: anytype, value: anytype) @TypeOf(stream).Error!void {
     const T = @TypeOf(value);
-    switch (@typeInfo(T)) {
-        .Void => return,
-        .Bool => try stream.writeIntLittle(u8, if (value) @as(u8, 1) else @as(u8, 0)),
-        .Float => switch (T) {
-            f32 => try stream.writeIntLittle(u32, @bitCast(u32, value)),
-            f64 => try stream.writeIntLittle(u64, @bitCast(u64, value)),
-            else => unsupportedType(T),
-        },
-        .Int => switch (T) {
-            i8 => try stream.writeIntLittle(i8, value),
-            i16 => try stream.writeIntLittle(i16, value),
-            i32 => try stream.writeIntLittle(i32, value),
-            i64 => try stream.writeIntLittle(i64, value),
-            i128 => try stream.writeIntLittle(i128, value),
-            u8 => try stream.writeIntLittle(u8, value),
-            u16 => try stream.writeIntLittle(u16, value),
-            u32 => try stream.writeIntLittle(u32, value),
-            u64 => try stream.writeIntLittle(u64, value),
-            u128 => try stream.writeIntLittle(u128, value),
-            else => unsupportedType(T),
-        },
-        .Optional => {
-            if (value) |actual| {
-                try stream.writeIntLittle(u8, 1);
-                try serialize(stream, actual);
+    return switch (@typeInfo(T)) {
+        .Void => {},
+        .Bool => try serializeBool(stream, value),
+        .Float => try serializeFloat(stream, T, value),
+        .Int => try serializeInt(stream, T, value),
+        .Optional => |info| try serializeOptional(stream, info.child, value),
+        .Pointer => |info| try serializePointer(stream, info, T, value),
+        .Array => |info| try serializeArray(stream, info, T, value),
+        .Struct => |info| try serializeStruct(stream, info, T, value),
+        .Enum => try serializeEnum(stream, T, value),
+        .Union => |info| try serializeUnion(stream, info, T, value),
+        else => unsupportedType(T),
+    };
+}
+
+fn deserializeBool(stream: anytype) !bool {
+    switch (try stream.readIntLittle(u8)) {
+        0 => return false,
+        1 => return true,
+        else => invalidProtocol("Boolean values should be encoded as a single byte with value 0 or 1 only."),
+    }
+}
+
+fn deserializeFloat(stream: anytype, comptime T: type) !T {
+    switch (T) {
+        f32 => return @bitCast(T, try stream.readIntLittle(u32)),
+        f64 => return @bitCast(T, try stream.readIntLittle(u64)),
+        else => unsupportedType(T),
+    }
+}
+
+fn deserializeInt(stream: anytype, comptime T: type) !T {
+    switch (T) {
+        i8 => return try stream.readIntLittle(i8),
+        i16 => return try stream.readIntLittle(i16),
+        i32 => return try stream.readIntLittle(i32),
+        i64 => return try stream.readIntLittle(i64),
+        i128 => return try stream.readIntLittle(i128),
+        u8 => return try stream.readIntLittle(u8),
+        u16 => return try stream.readIntLittle(u16),
+        u32 => return try stream.readIntLittle(u32),
+        u64 => return try stream.readIntLittle(u64),
+        u128 => return try stream.readIntLittle(u128),
+        else => unsupportedType(T),
+    }
+}
+
+fn deserializeOptional(stream: anytype, allocator: std.mem.Allocator, comptime T: type) !?T {
+    switch (try stream.readIntLittle(u8)) {
+        // None
+        0 => return null,
+        // Some
+        1 => return try deserialize(stream, allocator, T),
+        else => invalidProtocol("Optional is encoded as a single 0 valued byte for null, or a single 1 valued byte followed by the encoding of the contained value."),
+    }
+}
+
+fn deserializePointer(stream: anytype, comptime info: std.builtin.Type.Pointer, allocator: std.mem.Allocator) ![]info.child {
+    const T = @Type(.{ .Pointer = info });
+    if (info.sentinel != null) unsupportedType(T);
+    switch (info.size) {
+        .One => unsupportedType(T),
+        .Slice => {
+            var len = @intCast(usize, try stream.readIntLittle(u64));
+            var memory = try allocator.alloc(info.child, len);
+            if (info.child == u8) {
+                const amount = try stream.readAll(memory);
+                if (amount != len) {
+                    invalidProtocol("The stream end was found before all required bytes were read.");
+                }
             } else {
-                // None
-                try stream.writeIntLittle(u8, 0);
+                for (0..len) |idx| {
+                    memory[idx] = try deserialize(stream, allocator, info.child);
+                }
             }
+            return memory;
         },
-        .Pointer => |ptr| {
-            if (ptr.sentinel != null) unsupportedType(T);
-            switch (ptr.size) {
-                .One => unsupportedType(T),
-                .Slice => {
-                    try stream.writeIntLittle(u64, value.len);
-                    if (ptr.child == u8) {
-                        try stream.writeAll(value);
-                    } else {
-                        for (value) |item| {
-                            try serialize(stream, item);
-                        }
-                    }
-                },
-                .C => unsupportedType(T),
-                .Many => unsupportedType(T),
+        .C => unsupportedType(T),
+        .Many => unsupportedType(T),
+    }
+}
+
+fn deserializeArray(stream: anytype, comptime info: std.builtin.Type.Array, allocator: std.mem.Allocator) ![info.len]info.child {
+    const T = @Type(.{ .Array = info });
+    if (info.sentinel != null) unsupportedType(T);
+    var value: T = undefined;
+    if (info.child == u8) {
+        const amount = try stream.readAll(value[0..]);
+        if (amount != info.len) {
+            invalidProtocol("The stream end was found before all required bytes were read.");
+        }
+    } else {
+        for (0..info.len) |idx| {
+            value[idx] = try deserialize(stream, allocator, info.child);
+        }
+    }
+    return value;
+}
+
+fn deserializeStruct(stream: anytype, comptime info: std.builtin.Type.Struct, allocator: std.mem.Allocator, comptime T: type) !T {
+    var value: T = undefined;
+    inline for (info.fields) |field| {
+        @field(value, field.name) = try deserialize(stream, allocator, field.type);
+    }
+    return value;
+}
+
+fn deserializeEnum(stream: anytype, comptime T: type) !T {
+    const raw_tag = try deserializeInt(stream, u32);
+    return @intToEnum(T, raw_tag);
+}
+
+fn deserializeUnion(stream: anytype, comptime info: std.builtin.Type.Union, allocator: std.mem.Allocator, comptime T: type) !T {
+    if (info.tag_type) |Tag| {
+        const raw_tag = try deserialize(stream, allocator, u32);
+        const tag = @intToEnum(Tag, raw_tag);
+
+        inline for (info.fields) |field| {
+            if (tag == @field(Tag, field.name)) {
+                var inner = try deserialize(stream, allocator, field.type);
+                return @unionInit(T, field.name, inner);
             }
-        },
-        .Array => |arr| {
-            if (arr.sentinel != null) unsupportedType(T);
-            if (arr.child == u8) {
+        }
+        unreachable;
+    } else {
+        unsupportedType(T);
+    }
+}
+
+pub fn serializeBool(stream: anytype, value: bool) @TypeOf(stream).Error!void {
+    const code: u8 = if (value) @as(u8, 1) else @as(u8, 0);
+    return stream.writeIntLittle(u8, code);
+}
+
+pub fn serializeFloat(stream: anytype, comptime T: type, value: T) @TypeOf(stream).Error!void {
+    switch (T) {
+        f32 => try stream.writeIntLittle(u32, @bitCast(u32, value)),
+        f64 => try stream.writeIntLittle(u64, @bitCast(u64, value)),
+        else => unsupportedType(T),
+    }
+}
+
+pub fn serializeInt(stream: anytype, comptime T: type, value: T) @TypeOf(stream).Error!void {
+    switch (T) {
+        i8 => try stream.writeIntLittle(i8, value),
+        i16 => try stream.writeIntLittle(i16, value),
+        i32 => try stream.writeIntLittle(i32, value),
+        i64 => try stream.writeIntLittle(i64, value),
+        i128 => try stream.writeIntLittle(i128, value),
+        u8 => try stream.writeIntLittle(u8, value),
+        u16 => try stream.writeIntLittle(u16, value),
+        u32 => try stream.writeIntLittle(u32, value),
+        u64 => try stream.writeIntLittle(u64, value),
+        u128 => try stream.writeIntLittle(u128, value),
+        else => unsupportedType(T),
+    }
+}
+
+pub fn serializeOptional(stream: anytype, comptime T: type, value: ?T) @TypeOf(stream).Error!void {
+    if (value) |actual| {
+        try stream.writeIntLittle(u8, 1);
+        try serialize(stream, actual);
+    } else {
+        // None
+        try stream.writeIntLittle(u8, 0);
+    }
+}
+
+pub fn serializePointer(stream: anytype, comptime info: std.builtin.Type.Pointer, comptime T: type, value: T) @TypeOf(stream).Error!void {
+    if (info.sentinel != null) unsupportedType(T);
+    switch (info.size) {
+        .One => unsupportedType(T),
+        .Slice => {
+            try stream.writeIntLittle(u64, value.len);
+            if (info.child == u8) {
                 try stream.writeAll(value);
             } else {
                 for (value) |item| {
@@ -162,29 +204,44 @@ pub fn serialize(stream: anytype, value: anytype) @TypeOf(stream).Error!void {
                 }
             }
         },
-        .Struct => |info| {
-            inline for (info.fields) |field| {
+        .C => unsupportedType(T),
+        .Many => unsupportedType(T),
+    }
+}
+
+pub fn serializeArray(stream: anytype, comptime info: std.builtin.Type.Array, comptime T: type, value: T) @TypeOf(stream).Error!void {
+    if (info.sentinel != null) unsupportedType(T);
+    if (info.child == u8) {
+        try stream.writeAll(value);
+    } else {
+        for (value) |item| {
+            try serialize(stream, item);
+        }
+    }
+}
+
+pub fn serializeStruct(stream: anytype, comptime info: std.builtin.Type.Struct, comptime T: type, value: T) @TypeOf(stream).Error!void {
+    inline for (info.fields) |field| {
+        try serialize(stream, @field(value, field.name));
+    }
+}
+
+pub fn serializeEnum(stream: anytype, comptime T: type, value: T) @TypeOf(stream).Error!void {
+    const tag: u32 = @enumToInt(value);
+    try serialize(stream, tag);
+}
+
+pub fn serializeUnion(stream: anytype, comptime info: std.builtin.Type.Union, comptime T: type, value: T) @TypeOf(stream).Error!void {
+    if (info.tag_type) |UnionTagType| {
+        const tag: u32 = @enumToInt(value);
+        try serialize(stream, tag);
+        inline for (info.fields) |field| {
+            if (value == @field(UnionTagType, field.name)) {
                 try serialize(stream, @field(value, field.name));
             }
-        },
-        .Enum => {
-            const tag: u32 = @enumToInt(value);
-            try serialize(stream, tag);
-        },
-        .Union => |info| {
-            if (info.tag_type) |UnionTagType| {
-                const tag: u32 = @enumToInt(value);
-                try serialize(stream, tag);
-                inline for (info.fields) |field| {
-                    if (value == @field(UnionTagType, field.name)) {
-                        try serialize(stream, @field(value, field.name));
-                    }
-                }
-            } else {
-                unsupportedType(T);
-            }
-        },
-        else => unsupportedType(T),
+        }
+    } else {
+        unsupportedType(T);
     }
 }
 
