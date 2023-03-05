@@ -14,8 +14,8 @@ Add a bincode-zig to your build.zig.zon file
 .{
     .dependencies = .{
         .@"bincode-zig" = .{
-            .url = "https://github.com/qbradley/bincode-zig/archive/2a6dce5616354dd8c793fb3aec2e1e2458a09018.tar.gz",
-            .hash = "12204c7201e3da18d1d355efdc6da845bf6e8de9cb81f2c2c6f62a64b7378d993b48",
+            .url = "https://github.com/qbradley/bincode-zig/archive/22f9347ed1a0d275fbd49c58d5e76859c31962fc.tar.gz",
+            .hash = "12200f0952d5c962987e58dd204fa38d144af051f8aea76ba86d049265e6cad86430",
         }
     },
 }
