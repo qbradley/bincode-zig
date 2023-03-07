@@ -4,8 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    b.addModule(.{
-        .name = "bincode-zig",
+    _ = b.addModule("bincode-zig", .{
         .source_file = .{ .path = "bincode.zig" },
     });
 
