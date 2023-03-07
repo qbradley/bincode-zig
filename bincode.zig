@@ -1,12 +1,5 @@
 const std = @import("std");
 
-// TODO: special case deserialize for top level slice that only
-// contains interior slices and input is a buffer, for a lazy
-// zero allocation deserializer.
-
-// TODO: add a way to deserialize from a buffer than can return
-// `[]const u8` slices from the buffer without allocating
-
 pub fn deserializeAlloc(stream: anytype, allocator: std.mem.Allocator, comptime T: type) !T {
     return switch (@typeInfo(T)) {
         .Void => {},
@@ -38,6 +31,22 @@ pub fn deserialize(stream: anytype, comptime T: type) !T {
     };
 }
 
+pub fn deserializeBuffer(comptime T: type, source: *[]const u8) T {
+    return switch (@typeInfo(T)) {
+        .Void => {},
+        .Bool => deserializeBufferBool(source),
+        .Float => deserializeBufferFloat(T, source),
+        .Int => deserializeBufferInt(T, source),
+        .Optional => |info| deserializeBufferOptional(info.child, source),
+        .Pointer => |info| deserializeBufferPointer(info, source),
+        .Array => |info| deserializeBufferArray(info, source),
+        .Struct => |info| deserializeBufferStruct(T, info, source),
+        .Enum => deserializeBufferEnum(T, source),
+        .Union => |info| deserializeBufferUnion(T, info, source),
+        else => unsupportedType(T),
+    };
+}
+
 pub fn serialize(stream: anytype, value: anytype) @TypeOf(stream).Error!void {
     const T = @TypeOf(value);
     return switch (@typeInfo(T)) {
@@ -53,6 +62,139 @@ pub fn serialize(stream: anytype, value: anytype) @TypeOf(stream).Error!void {
         .Union => |info| try serializeUnion(stream, info, T, value),
         else => unsupportedType(T),
     };
+}
+
+pub fn deserializeSliceIterator(comptime T: type, source: []const u8) DeserializeSliceIterator(T) {
+    return DeserializeSliceIterator(T){
+        .source = source,
+    };
+}
+
+pub fn DeserializeSliceIterator(comptime T: type) type {
+    return struct {
+        source: []const u8,
+
+        pub fn next(self: *@This()) ?T {
+            if (self.source.len > 0) {
+                return deserializeBuffer(T, &self.source);
+            } else {
+                return null;
+            }
+        }
+    };
+}
+
+fn deserializeBufferInt(comptime T: type, source_ptr: *[]const u8) T {
+    const bytesRequired = @sizeOf(T);
+    const source = source_ptr.*;
+    if (bytesRequired <= source.len) {
+        var tmp: [bytesRequired]u8 = undefined;
+        std.mem.copy(u8, &tmp, source[0..bytesRequired]);
+        source_ptr.* = source[bytesRequired..];
+        return std.mem.readIntLittle(T, &tmp);
+    } else {
+        invalidProtocol("Buffer ran out of bytes too soon.");
+    }
+}
+
+fn deserializeBufferBool(source: *[]const u8) bool {
+    return switch (deserializeBufferInt(u8, source)) {
+        0 => return false,
+        1 => return true,
+        else => invalidProtocol("Boolean values should be encoded as a single byte with value 0 or 1 only."),
+    };
+}
+
+fn deserializeBufferOptional(comptime T: type, source: *[]const u8) ?T {
+    if (deserializeBufferBool(source)) {
+        return deserializeBuffer(T, source);
+    } else {
+        return null;
+    }
+}
+
+fn deserializeBufferFloat(comptime T: type, source: *[]const u8) T {
+    switch (T) {
+        f32 => return @bitCast(T, deserializeBufferInt(u32, source)),
+        f64 => return @bitCast(T, deserializeBufferInt(u64, source)),
+        else => unsupportedType(T),
+    }
+}
+
+fn deserializeBufferEnum(comptime T: type, source: *[]const u8) T {
+    const raw_tag = deserializeBufferInt(u32, source);
+    return @intToEnum(T, raw_tag);
+}
+
+fn deserializeBufferStruct(comptime T: type, comptime info: std.builtin.Type.Struct, source: *[]const u8) T {
+    var value: T = undefined;
+    inline for (info.fields) |field| {
+        @field(value, field.name) = deserializeBuffer(field.type, source);
+    }
+    return value;
+}
+
+fn deserializeBufferUnion(comptime T: type, comptime info: std.builtin.Type.Union, source: *[]const u8) T {
+    if (info.tag_type) |Tag| {
+        const raw_tag = deserializeBufferInt(u32, source);
+        const tag = @intToEnum(Tag, raw_tag);
+
+        inline for (info.fields) |field| {
+            if (tag == @field(Tag, field.name)) {
+                var inner = deserializeBuffer(field.type, source);
+                return @unionInit(T, field.name, inner);
+            }
+        }
+        unreachable;
+    } else {
+        unsupportedType(T);
+    }
+}
+
+fn deserializeBufferArray(comptime info: std.builtin.Type.Array, source_ptr: *[]const u8) [info.len]info.child {
+    const T = @Type(.{ .Array = info });
+    if (info.sentinel != null) unsupportedType(T);
+    var value: T = undefined;
+    if (info.child == u8) {
+        const source = source_ptr.*;
+        if (info.len <= source.len) {
+            std.mem.copy(u8, &value, source[0..info.len]);
+            source_ptr.* = source[info.len..];
+        } else {
+            invalidProtocol("The stream end was found before all required bytes were read.");
+        }
+    } else {
+        for (0..info.len) |idx| {
+            value[idx] = deserializeBuffer(info.child, source_ptr);
+        }
+    }
+    return value;
+}
+
+fn deserializeBufferPointer(comptime info: std.builtin.Type.Pointer, source_ptr: *[]const u8) []const info.child {
+    const T = @Type(.{ .Pointer = info });
+    if (info.sentinel != null) unsupportedType(T);
+    switch (info.size) {
+        .One => unsupportedType(T),
+        .Slice => {
+            var len = @intCast(usize, deserializeBufferInt(u64, source_ptr));
+            if (info.child == u8) {
+                const source = source_ptr.*;
+                if (len <= source.len) {
+                    source_ptr.* = source[len..];
+                    return source[0..len];
+                } else {
+                    invalidProtocol("The stream end was found before all required bytes were read.");
+                }
+            } else {
+                // we can't support a variable slice of types where the stream format
+                // differs from in-memory format without allocating.
+                unsupportedType(T);
+            }
+        },
+        .C => unsupportedType(T),
+        .Many => unsupportedType(T),
+    }
 }
 
 fn deserializeBool(stream: anytype) !bool {
@@ -412,6 +554,30 @@ test "round trip" {
 
             // NOTE: expectEqual does not do structural equality for slices.
         }
+
+        fn validateBuffer(comptime T: type, value: T, expected: []const u8) !void {
+            var buffer: [8192]u8 = undefined;
+
+            // serialize value and make sure it matches exactly the bytes
+            // from the rust implementation.
+            var output_stream = std.io.fixedBufferStream(buffer[0..]);
+            try serialize(output_stream.writer(), value);
+            try std.testing.expectEqualSlices(u8, expected, output_stream.getWritten());
+
+            // deserialize the bytes and make sure resulting object is exactly
+            // what we started with.
+            var input_stream: []const u8 = expected;
+            var copy = deserializeBuffer(T, &input_stream);
+            try expectEqual(@as(usize, 0), input_stream.len);
+
+            if (@typeInfo(T) == .Struct and @hasDecl(T, "validate")) {
+                try T.validate(value, copy);
+            } else {
+                try std.testing.expectEqual(value, copy);
+            }
+
+            // NOTE: expectEqual does not do structural equality for slices.
+        }
     };
 
     var testTypeAlloc = TestTypeAlloc{
@@ -466,6 +632,31 @@ test "round trip" {
     try Integration.validate(f64, 6.6, examples.int_f64);
     try Integration.validate(bool, false, examples.bool_false);
     try Integration.validate(bool, true, examples.bool_true);
+
+    try Integration.validateBuffer(TestTypeAlloc, testTypeAlloc, examples.test_type_alloc);
+    try Integration.validateBuffer(TestType, testType, examples.test_type);
+    try Integration.validateBuffer(TestUnion, .{ .x = 6 }, examples.test_union);
+    try Integration.validateBuffer(TestEnum, .Two, examples.test_enum);
+    try Integration.validateBuffer(?u8, null, examples.none);
+    try Integration.validateBuffer(i8, 100, examples.int_i8);
+    try Integration.validateBuffer(u8, 101, examples.int_u8);
+    try Integration.validateBuffer(i16, 102, examples.int_i16);
+    try Integration.validateBuffer(u16, 103, examples.int_u16);
+    try Integration.validateBuffer(i32, 104, examples.int_i32);
+    try Integration.validateBuffer(u32, 105, examples.int_u32);
+    try Integration.validateBuffer(i64, 106, examples.int_i64);
+    try Integration.validateBuffer(u64, 107, examples.int_u64);
+    try Integration.validateBuffer(i128, 108, examples.int_i128);
+    try Integration.validateBuffer(u128, 109, examples.int_u128);
+    try Integration.validateBuffer(f32, 5.5, examples.int_f32);
+    try Integration.validateBuffer(f64, 6.6, examples.int_f64);
+    try Integration.validateBuffer(bool, false, examples.bool_false);
+    try Integration.validateBuffer(bool, true, examples.bool_true);
+
+    var iterator = deserializeSliceIterator(TestTypeAlloc, examples.test_type_alloc);
+    var first = iterator.next().?;
+    try first.validate(testTypeAlloc);
+    try expectEqual(@as(?TestTypeAlloc, null), iterator.next());
 }
 
 test "example" {
