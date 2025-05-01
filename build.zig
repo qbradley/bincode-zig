@@ -5,11 +5,11 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     _ = b.addModule("bincode-zig", .{
-        .source_file = .{ .path = "bincode.zig" },
+        .root_source_file = b.path("bincode.zig"),
     });
 
     const exe_tests = b.addTest(.{
-        .root_source_file = .{ .path = "bincode.zig" },
+        .root_source_file = b.path("bincode.zig"),
         .target = target,
         .optimize = optimize,
     });
