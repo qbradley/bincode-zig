@@ -2,47 +2,47 @@ const std = @import("std");
 
 pub fn deserializeAlloc(stream: anytype, allocator: std.mem.Allocator, comptime T: type) !T {
     return switch (@typeInfo(T)) {
-        .Void => {},
-        .Bool => try deserializeBool(stream),
-        .Float => try deserializeFloat(stream, T),
-        .Int => try deserializeInt(stream, T),
-        .Optional => |info| try deserializeOptionalAlloc(stream, allocator, info.child),
-        .Pointer => |info| try deserializePointerAlloc(stream, info, allocator),
-        .Array => |info| try deserializeArrayAlloc(stream, info, allocator),
-        .Struct => |info| try deserializeStructAlloc(stream, info, allocator, T),
-        .Enum => try deserializeEnum(stream, T),
-        .Union => |info| try deserializeUnionAlloc(stream, info, allocator, T),
+        .void => {},
+        .bool => try deserializeBool(stream),
+        .float => try deserializeFloat(stream, T),
+        .int => try deserializeInt(stream, T),
+        .optional => |info| try deserializeOptionalAlloc(stream, allocator, info.child),
+        .pointer => |info| try deserializePointerAlloc(stream, info, allocator),
+        .array => |info| try deserializeArrayAlloc(stream, info, allocator),
+        .@"struct" => |info| try deserializeStructAlloc(stream, info, allocator, T),
+        .@"enum" => try deserializeEnum(stream, T),
+        .@"union" => |info| try deserializeUnionAlloc(stream, info, allocator, T),
         else => unsupportedType(T),
     };
 }
 
 pub fn deserialize(stream: anytype, comptime T: type) !T {
     return switch (@typeInfo(T)) {
-        .Void => {},
-        .Bool => try deserializeBool(stream),
-        .Float => try deserializeFloat(stream, T),
-        .Int => try deserializeInt(stream, T),
-        .Optional => |info| try deserializeOptional(stream, info.child),
-        .Array => |info| try deserializeArray(stream, info),
-        .Struct => |info| try deserializeStruct(stream, info, T),
-        .Enum => try deserializeEnum(stream, T),
-        .Union => |info| try deserializeUnion(stream, info, T),
+        .void => {},
+        .bool => try deserializeBool(stream),
+        .float => try deserializeFloat(stream, T),
+        .int => try deserializeInt(stream, T),
+        .optional => |info| try deserializeOptional(stream, info.child),
+        .array => |info| try deserializeArray(stream, info),
+        .@"struct" => |info| try deserializeStruct(stream, info, T),
+        .@"enum" => try deserializeEnum(stream, T),
+        .@"union" => |info| try deserializeUnion(stream, info, T),
         else => unsupportedType(T),
     };
 }
 
 pub fn deserializeBuffer(comptime T: type, source: *[]const u8) T {
     return switch (@typeInfo(T)) {
-        .Void => {},
-        .Bool => deserializeBufferBool(source),
-        .Float => deserializeBufferFloat(T, source),
-        .Int => deserializeBufferInt(T, source),
-        .Optional => |info| deserializeBufferOptional(info.child, source),
-        .Pointer => |info| deserializeBufferPointer(info, source),
-        .Array => |info| deserializeBufferArray(info, source),
-        .Struct => |info| deserializeBufferStruct(T, info, source),
-        .Enum => deserializeBufferEnum(T, source),
-        .Union => |info| deserializeBufferUnion(T, info, source),
+        .void => {},
+        .bool => deserializeBufferBool(source),
+        .float => deserializeBufferFloat(T, source),
+        .int => deserializeBufferInt(T, source),
+        .optional => |info| deserializeBufferOptional(info.child, source),
+        .pointer => |info| deserializeBufferPointer(info, source),
+        .array => |info| deserializeBufferArray(info, source),
+        .@"struct" => |info| deserializeBufferStruct(T, info, source),
+        .@"enum" => deserializeBufferEnum(T, source),
+        .@"union" => |info| deserializeBufferUnion(T, info, source),
         else => unsupportedType(T),
     };
 }
@@ -50,16 +50,16 @@ pub fn deserializeBuffer(comptime T: type, source: *[]const u8) T {
 pub fn serialize(stream: anytype, value: anytype) @TypeOf(stream).Error!void {
     const T = @TypeOf(value);
     return switch (@typeInfo(T)) {
-        .Void => {},
-        .Bool => try serializeBool(stream, value),
-        .Float => try serializeFloat(stream, T, value),
-        .Int => try serializeInt(stream, T, value),
-        .Optional => |info| try serializeOptional(stream, info.child, value),
-        .Pointer => |info| try serializePointer(stream, info, T, value),
-        .Array => |info| try serializeArray(stream, info, T, value),
-        .Struct => |info| try serializeStruct(stream, info, T, value),
-        .Enum => try serializeEnum(stream, T, value),
-        .Union => |info| try serializeUnion(stream, info, T, value),
+        .void => {},
+        .bool => try serializeBool(stream, value),
+        .float => try serializeFloat(stream, T, value),
+        .int => try serializeInt(stream, T, value),
+        .optional => |info| try serializeOptional(stream, info.child, value),
+        .pointer => |info| try serializePointer(stream, info, T, value),
+        .array => |info| try serializeArray(stream, info, T, value),
+        .@"struct" => |info| try serializeStruct(stream, info, T, value),
+        .@"enum" => try serializeEnum(stream, T, value),
+        .@"union" => |info| try serializeUnion(stream, info, T, value),
         else => unsupportedType(T),
     };
 }
@@ -89,9 +89,9 @@ fn deserializeBufferInt(comptime T: type, source_ptr: *[]const u8) T {
     const source = source_ptr.*;
     if (bytesRequired <= source.len) {
         var tmp: [bytesRequired]u8 = undefined;
-        std.mem.copy(u8, &tmp, source[0..bytesRequired]);
+        std.mem.copyForwards(u8, &tmp, source[0..bytesRequired]);
         source_ptr.* = source[bytesRequired..];
-        return std.mem.readIntLittle(T, &tmp);
+        return std.mem.readInt(T, &tmp, .little);
     } else {
         invalidProtocol("Buffer ran out of bytes too soon.");
     }
@@ -115,15 +115,15 @@ fn deserializeBufferOptional(comptime T: type, source: *[]const u8) ?T {
 
 fn deserializeBufferFloat(comptime T: type, source: *[]const u8) T {
     switch (T) {
-        f32 => return @bitCast(T, deserializeBufferInt(u32, source)),
-        f64 => return @bitCast(T, deserializeBufferInt(u64, source)),
+        f32 => return @bitCast(deserializeBufferInt(u32, source)),
+        f64 => return @bitCast(deserializeBufferInt(u64, source)),
         else => unsupportedType(T),
     }
 }
 
 fn deserializeBufferEnum(comptime T: type, source: *[]const u8) T {
     const raw_tag = deserializeBufferInt(u32, source);
-    return @intToEnum(T, raw_tag);
+    return @enumFromInt(raw_tag);
 }
 
 fn deserializeBufferStruct(comptime T: type, comptime info: std.builtin.Type.Struct, source: *[]const u8) T {
@@ -137,11 +137,11 @@ fn deserializeBufferStruct(comptime T: type, comptime info: std.builtin.Type.Str
 fn deserializeBufferUnion(comptime T: type, comptime info: std.builtin.Type.Union, source: *[]const u8) T {
     if (info.tag_type) |Tag| {
         const raw_tag = deserializeBufferInt(u32, source);
-        const tag = @intToEnum(Tag, raw_tag);
+        const tag: Tag = @enumFromInt(raw_tag);
 
         inline for (info.fields) |field| {
             if (tag == @field(Tag, field.name)) {
-                var inner = deserializeBuffer(field.type, source);
+                const inner = deserializeBuffer(field.type, source);
                 return @unionInit(T, field.name, inner);
             }
         }
@@ -152,13 +152,13 @@ fn deserializeBufferUnion(comptime T: type, comptime info: std.builtin.Type.Unio
 }
 
 fn deserializeBufferArray(comptime info: std.builtin.Type.Array, source_ptr: *[]const u8) [info.len]info.child {
-    const T = @Type(.{ .Array = info });
-    if (info.sentinel != null) unsupportedType(T);
+    const T = @Type(.{ .array = info });
+    if (info.sentinel_ptr != null) unsupportedType(T);
     var value: T = undefined;
     if (info.child == u8) {
         const source = source_ptr.*;
         if (info.len <= source.len) {
-            std.mem.copy(u8, &value, source[0..info.len]);
+            std.mem.copyForwards(u8, &value, source[0..info.len]);
             source_ptr.* = source[info.len..];
         } else {
             invalidProtocol("The stream end was found before all required bytes were read.");
@@ -172,12 +172,12 @@ fn deserializeBufferArray(comptime info: std.builtin.Type.Array, source_ptr: *[]
 }
 
 fn deserializeBufferPointer(comptime info: std.builtin.Type.Pointer, source_ptr: *[]const u8) []const info.child {
-    const T = @Type(.{ .Pointer = info });
-    if (info.sentinel != null) unsupportedType(T);
+    const T = @Type(.{ .pointer = info });
+    if (info.sentinel_ptr != null) unsupportedType(T);
     switch (info.size) {
-        .One => unsupportedType(T),
-        .Slice => {
-            var len = @intCast(usize, deserializeBufferInt(u64, source_ptr));
+        .one => unsupportedType(T),
+        .slice => {
+            const len: usize = @intCast(deserializeBufferInt(u64, source_ptr));
             if (info.child == u8) {
                 const source = source_ptr.*;
                 if (len <= source.len) {
@@ -192,13 +192,13 @@ fn deserializeBufferPointer(comptime info: std.builtin.Type.Pointer, source_ptr:
                 unsupportedType(T);
             }
         },
-        .C => unsupportedType(T),
-        .Many => unsupportedType(T),
+        .c => unsupportedType(T),
+        .many => unsupportedType(T),
     }
 }
 
 fn deserializeBool(stream: anytype) !bool {
-    switch (try stream.readIntLittle(u8)) {
+    switch (try stream.readInt(u8, .little)) {
         0 => return false,
         1 => return true,
         else => invalidProtocol("Boolean values should be encoded as a single byte with value 0 or 1 only."),
@@ -207,30 +207,30 @@ fn deserializeBool(stream: anytype) !bool {
 
 fn deserializeFloat(stream: anytype, comptime T: type) !T {
     switch (T) {
-        f32 => return @bitCast(T, try stream.readIntLittle(u32)),
-        f64 => return @bitCast(T, try stream.readIntLittle(u64)),
+        f32 => return @bitCast(try stream.readInt(u32, .little)),
+        f64 => return @bitCast(try stream.readInt(u64, .little)),
         else => unsupportedType(T),
     }
 }
 
 fn deserializeInt(stream: anytype, comptime T: type) !T {
     switch (T) {
-        i8 => return try stream.readIntLittle(i8),
-        i16 => return try stream.readIntLittle(i16),
-        i32 => return try stream.readIntLittle(i32),
-        i64 => return try stream.readIntLittle(i64),
-        i128 => return try stream.readIntLittle(i128),
-        u8 => return try stream.readIntLittle(u8),
-        u16 => return try stream.readIntLittle(u16),
-        u32 => return try stream.readIntLittle(u32),
-        u64 => return try stream.readIntLittle(u64),
-        u128 => return try stream.readIntLittle(u128),
+        i8 => return try stream.readInt(i8, .little),
+        i16 => return try stream.readInt(i16, .little),
+        i32 => return try stream.readInt(i32, .little),
+        i64 => return try stream.readInt(i64, .little),
+        i128 => return try stream.readInt(i128, .little),
+        u8 => return try stream.readInt(u8, .little),
+        u16 => return try stream.readInt(u16, .little),
+        u32 => return try stream.readInt(u32, .little),
+        u64 => return try stream.readInt(u64, .little),
+        u128 => return try stream.readInt(u128, .little),
         else => unsupportedType(T),
     }
 }
 
 fn deserializeOptionalAlloc(stream: anytype, allocator: std.mem.Allocator, comptime T: type) !?T {
-    switch (try stream.readIntLittle(u8)) {
+    switch (try stream.readInt(u8, .little)) {
         // None
         0 => return null,
         // Some
@@ -240,7 +240,7 @@ fn deserializeOptionalAlloc(stream: anytype, allocator: std.mem.Allocator, compt
 }
 
 fn deserializeOptional(stream: anytype, comptime T: type) !?T {
-    switch (try stream.readIntLittle(u8)) {
+    switch (try stream.readInt(u8, .little)) {
         // None
         0 => return null,
         // Some
@@ -250,12 +250,12 @@ fn deserializeOptional(stream: anytype, comptime T: type) !?T {
 }
 
 fn deserializePointerAlloc(stream: anytype, comptime info: std.builtin.Type.Pointer, allocator: std.mem.Allocator) ![]info.child {
-    const T = @Type(.{ .Pointer = info });
-    if (info.sentinel != null) unsupportedType(T);
+    const T = @Type(.{ .pointer = info });
+    if (info.sentinel_ptr != null) unsupportedType(T);
     switch (info.size) {
-        .One => unsupportedType(T),
-        .Slice => {
-            var len = @intCast(usize, try stream.readIntLittle(u64));
+        .one => unsupportedType(T),
+        .slice => {
+            const len: usize = @intCast(try stream.readInt(u64, .little));
             var memory = try allocator.alloc(info.child, len);
             if (info.child == u8) {
                 const amount = try stream.readAll(memory);
@@ -269,14 +269,14 @@ fn deserializePointerAlloc(stream: anytype, comptime info: std.builtin.Type.Poin
             }
             return memory;
         },
-        .C => unsupportedType(T),
-        .Many => unsupportedType(T),
+        .c => unsupportedType(T),
+        .many => unsupportedType(T),
     }
 }
 
 fn deserializeArrayAlloc(stream: anytype, comptime info: std.builtin.Type.Array, allocator: std.mem.Allocator) ![info.len]info.child {
-    const T = @Type(.{ .Array = info });
-    if (info.sentinel != null) unsupportedType(T);
+    const T = @Type(.{ .array = info });
+    if (info.sentinel_ptr != null) unsupportedType(T);
     var value: T = undefined;
     if (info.child == u8) {
         const amount = try stream.readAll(value[0..]);
@@ -292,8 +292,8 @@ fn deserializeArrayAlloc(stream: anytype, comptime info: std.builtin.Type.Array,
 }
 
 fn deserializeArray(stream: anytype, comptime info: std.builtin.Type.Array) ![info.len]info.child {
-    const T = @Type(.{ .Array = info });
-    if (info.sentinel != null) unsupportedType(T);
+    const T = @Type(.{ .array = info });
+    if (info.sentinel_ptr != null) unsupportedType(T);
     var value: T = undefined;
     if (info.child == u8) {
         const amount = try stream.readAll(value[0..]);
@@ -326,17 +326,17 @@ fn deserializeStruct(stream: anytype, comptime info: std.builtin.Type.Struct, co
 
 fn deserializeEnum(stream: anytype, comptime T: type) !T {
     const raw_tag = try deserializeInt(stream, u32);
-    return @intToEnum(T, raw_tag);
+    return @enumFromInt(raw_tag);
 }
 
 fn deserializeUnionAlloc(stream: anytype, comptime info: std.builtin.Type.Union, allocator: std.mem.Allocator, comptime T: type) !T {
     if (info.tag_type) |Tag| {
         const raw_tag = try deserializeAlloc(stream, allocator, u32);
-        const tag = @intToEnum(Tag, raw_tag);
+        const tag: Tag = @enumFromInt(raw_tag);
 
         inline for (info.fields) |field| {
             if (tag == @field(Tag, field.name)) {
-                var inner = try deserializeAlloc(stream, allocator, field.type);
+                const inner = try deserializeAlloc(stream, allocator, field.type);
                 return @unionInit(T, field.name, inner);
             }
         }
@@ -349,11 +349,11 @@ fn deserializeUnionAlloc(stream: anytype, comptime info: std.builtin.Type.Union,
 fn deserializeUnion(stream: anytype, comptime info: std.builtin.Type.Union, comptime T: type) !T {
     if (info.tag_type) |Tag| {
         const raw_tag = try deserialize(stream, u32);
-        const tag = @intToEnum(Tag, raw_tag);
+        const tag: Tag = @enumFromInt(raw_tag);
 
         inline for (info.fields) |field| {
             if (tag == @field(Tag, field.name)) {
-                var inner = try deserialize(stream, field.type);
+                const inner = try deserialize(stream, field.type);
                 return @unionInit(T, field.name, inner);
             }
         }
@@ -365,49 +365,49 @@ fn deserializeUnion(stream: anytype, comptime info: std.builtin.Type.Union, comp
 
 pub fn serializeBool(stream: anytype, value: bool) @TypeOf(stream).Error!void {
     const code: u8 = if (value) @as(u8, 1) else @as(u8, 0);
-    return stream.writeIntLittle(u8, code);
+    return stream.writeInt(u8, code, .little);
 }
 
 pub fn serializeFloat(stream: anytype, comptime T: type, value: T) @TypeOf(stream).Error!void {
     switch (T) {
-        f32 => try stream.writeIntLittle(u32, @bitCast(u32, value)),
-        f64 => try stream.writeIntLittle(u64, @bitCast(u64, value)),
+        f32 => try stream.writeInt(u32, @bitCast(value), .little),
+        f64 => try stream.writeInt(u64, @bitCast(value), .little),
         else => unsupportedType(T),
     }
 }
 
 pub fn serializeInt(stream: anytype, comptime T: type, value: T) @TypeOf(stream).Error!void {
     switch (T) {
-        i8 => try stream.writeIntLittle(i8, value),
-        i16 => try stream.writeIntLittle(i16, value),
-        i32 => try stream.writeIntLittle(i32, value),
-        i64 => try stream.writeIntLittle(i64, value),
-        i128 => try stream.writeIntLittle(i128, value),
-        u8 => try stream.writeIntLittle(u8, value),
-        u16 => try stream.writeIntLittle(u16, value),
-        u32 => try stream.writeIntLittle(u32, value),
-        u64 => try stream.writeIntLittle(u64, value),
-        u128 => try stream.writeIntLittle(u128, value),
+        i8 => try stream.writeInt(i8, value, .little),
+        i16 => try stream.writeInt(i16, value, .little),
+        i32 => try stream.writeInt(i32, value, .little),
+        i64 => try stream.writeInt(i64, value, .little),
+        i128 => try stream.writeInt(i128, value, .little),
+        u8 => try stream.writeInt(u8, value, .little),
+        u16 => try stream.writeInt(u16, value, .little),
+        u32 => try stream.writeInt(u32, value, .little),
+        u64 => try stream.writeInt(u64, value, .little),
+        u128 => try stream.writeInt(u128, value, .little),
         else => unsupportedType(T),
     }
 }
 
 pub fn serializeOptional(stream: anytype, comptime T: type, value: ?T) @TypeOf(stream).Error!void {
     if (value) |actual| {
-        try stream.writeIntLittle(u8, 1);
+        try stream.writeInt(u8, 1, .little);
         try serialize(stream, actual);
     } else {
         // None
-        try stream.writeIntLittle(u8, 0);
+        try stream.writeInt(u8, 0, .little);
     }
 }
 
 pub fn serializePointer(stream: anytype, comptime info: std.builtin.Type.Pointer, comptime T: type, value: T) @TypeOf(stream).Error!void {
-    if (info.sentinel != null) unsupportedType(T);
+    if (info.sentinel_ptr != null) unsupportedType(T);
     switch (info.size) {
-        .One => unsupportedType(T),
-        .Slice => {
-            try stream.writeIntLittle(u64, value.len);
+        .one => unsupportedType(T),
+        .slice => {
+            try stream.writeInt(u64, value.len, .little);
             if (info.child == u8) {
                 try stream.writeAll(value);
             } else {
@@ -416,13 +416,13 @@ pub fn serializePointer(stream: anytype, comptime info: std.builtin.Type.Pointer
                 }
             }
         },
-        .C => unsupportedType(T),
-        .Many => unsupportedType(T),
+        .c => unsupportedType(T),
+        .many => unsupportedType(T),
     }
 }
 
 pub fn serializeArray(stream: anytype, comptime info: std.builtin.Type.Array, comptime T: type, value: T) @TypeOf(stream).Error!void {
-    if (info.sentinel != null) unsupportedType(T);
+    if (info.sentinel_ptr != null) unsupportedType(T);
     if (info.child == u8) {
         try stream.writeAll(value);
     } else {
@@ -439,13 +439,13 @@ pub fn serializeStruct(stream: anytype, comptime info: std.builtin.Type.Struct, 
 }
 
 pub fn serializeEnum(stream: anytype, comptime T: type, value: T) @TypeOf(stream).Error!void {
-    const tag: u32 = @enumToInt(value);
+    const tag: u32 = @intFromEnum(value);
     try serialize(stream, tag);
 }
 
 pub fn serializeUnion(stream: anytype, comptime info: std.builtin.Type.Union, comptime T: type, value: T) @TypeOf(stream).Error!void {
     if (info.tag_type) |UnionTagType| {
-        const tag: u32 = @enumToInt(value);
+        const tag: u32 = @intFromEnum(value);
         try serialize(stream, tag);
         inline for (info.fields) |field| {
             if (value == @field(UnionTagType, field.name)) {
@@ -522,9 +522,9 @@ test "round trip" {
             var input_stream = std.io.fixedBufferStream(expected);
             var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
             defer arena.deinit();
-            var copy = try deserializeAlloc(input_stream.reader(), arena.allocator(), T);
+            const copy = try deserializeAlloc(input_stream.reader(), arena.allocator(), T);
 
-            if (@typeInfo(T) == .Struct and @hasDecl(T, "validate")) {
+            if (@typeInfo(T) == .@"struct" and @hasDecl(T, "validate")) {
                 try T.validate(value, copy);
             } else {
                 try std.testing.expectEqual(value, copy);
@@ -544,9 +544,9 @@ test "round trip" {
             // deserialize the bytes and make sure resulting object is exactly
             // what we started with.
             var input_stream = std.io.fixedBufferStream(expected);
-            var copy = try deserialize(input_stream.reader(), T);
+            const copy = try deserialize(input_stream.reader(), T);
 
-            if (@typeInfo(T) == .Struct and @hasDecl(T, "validate")) {
+            if (@typeInfo(T) == .@"struct" and @hasDecl(T, "validate")) {
                 try T.validate(value, copy);
             } else {
                 try std.testing.expectEqual(value, copy);
@@ -567,10 +567,10 @@ test "round trip" {
             // deserialize the bytes and make sure resulting object is exactly
             // what we started with.
             var input_stream: []const u8 = expected;
-            var copy = deserializeBuffer(T, &input_stream);
+            const copy = deserializeBuffer(T, &input_stream);
             try expectEqual(@as(usize, 0), input_stream.len);
 
-            if (@typeInfo(T) == .Struct and @hasDecl(T, "validate")) {
+            if (@typeInfo(T) == .@"struct" and @hasDecl(T, "validate")) {
                 try T.validate(value, copy);
             } else {
                 try std.testing.expectEqual(value, copy);
@@ -580,7 +580,7 @@ test "round trip" {
         }
     };
 
-    var testTypeAlloc = TestTypeAlloc{
+    const testTypeAlloc = TestTypeAlloc{
         .u = .{ .y = 5 },
         .e = .One,
         .s = "abcdefgh",
@@ -607,7 +607,7 @@ test "round trip" {
     try Integration.validateAlloc(bool, false, examples.bool_false);
     try Integration.validateAlloc(bool, true, examples.bool_true);
 
-    var testType = TestType{
+    const testType = TestType{
         .u = .{ .y = 5 },
         .e = .One,
         .point = .{ 1.1, 2.2 },
@@ -667,7 +667,7 @@ test "example" {
         age: u32,
     };
 
-    var example = Shared{ .name = "Cat", .age = 5 };
+    const example = Shared{ .name = "Cat", .age = 5 };
 
     // Serialize Shared to buffer
     var buffer: [8192]u8 = undefined;
